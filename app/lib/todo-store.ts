@@ -61,7 +61,11 @@ async function runQuery<T extends Record<string, unknown>>(
   }
 
   if (lastError instanceof Error) {
-    throw lastError;
+    const errorCode =
+      typeof (lastError as { code?: unknown }).code === 'string'
+        ? (lastError as { code: string }).code
+        : 'UNKNOWN';
+    throw new Error(`Failed to connect to database: ${lastError.message} (${errorCode})`);
   }
 
   throw new Error('Failed to connect to database.');
