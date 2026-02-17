@@ -1,12 +1,18 @@
 import { NextResponse } from 'next/server';
 import { createTodo, listTodos } from '@/app/lib/todo-store';
+import { toApiErrorResponse } from '@/app/lib/api-error';
 import type { CreateTodoPayload } from '@/app/lib/todo-types';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET() {
-  const todos = await listTodos();
-  return NextResponse.json({ todos });
+  try {
+    const todos = await listTodos();
+    return NextResponse.json({ todos });
+  } catch (error) {
+    const apiError = toApiErrorResponse(error, 'Failed to load todos.');
+    return NextResponse.json({ error: apiError.error }, { status: apiError.status });
+  }
 }
 
 export async function POST(request: Request) {
@@ -26,8 +32,7 @@ export async function POST(request: Request) {
     const todo = await createTodo(body.title);
     return NextResponse.json({ todo }, { status: 201 });
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : 'Failed to create todo.';
-    return NextResponse.json({ error: message }, { status: 400 });
+    const apiError = toApiErrorResponse(error, 'Failed to create todo.');
+    return NextResponse.json({ error: apiError.error }, { status: apiError.status });
   }
 }

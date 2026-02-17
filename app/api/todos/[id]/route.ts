@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { removeTodo, updateTodo } from '@/app/lib/todo-store';
+import { toApiErrorResponse } from '@/app/lib/api-error';
 import type { UpdateTodoPayload } from '@/app/lib/todo-types';
 
 type RouteContext = {
@@ -48,17 +49,21 @@ export async function PATCH(request: Request, context: RouteContext) {
     }
     return NextResponse.json({ todo });
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : 'Failed to update todo.';
-    return NextResponse.json({ error: message }, { status: 400 });
+    const apiError = toApiErrorResponse(error, 'Failed to update todo.');
+    return NextResponse.json({ error: apiError.error }, { status: apiError.status });
   }
 }
 
 export async function DELETE(_request: Request, context: RouteContext) {
   const { id } = await context.params;
-  const removed = await removeTodo(id);
-  if (!removed) {
-    return NextResponse.json({ error: 'Todo not found.' }, { status: 404 });
+  try {
+    const removed = await removeTodo(id);
+    if (!removed) {
+      return NextResponse.json({ error: 'Todo not found.' }, { status: 404 });
+    }
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    const apiError = toApiErrorResponse(error, 'Failed to delete todo.');
+    return NextResponse.json({ error: apiError.error }, { status: apiError.status });
   }
-  return NextResponse.json({ success: true });
 }

@@ -1,44 +1,123 @@
 import { randomUUID } from 'crypto';
-import { promises as fs } from 'fs';
-import path from 'path';
+import { createClient, createPool } from '@vercel/postgres';
 import type { Todo, UpdateTodoPayload } from '@/app/lib/todo-types';
 
-const dataFilePath = path.join(process.cwd(), 'data', 'todos.json');
-let storeLock: Promise<unknown> = Promise.resolve();
+type TodoRow = {
+  id: string;
+  title: string;
+  completed: boolean;
+  created_at: string | Date;
+  updated_at: string | Date;
+};
 
-async function ensureDataFile() {
-  await fs.mkdir(path.dirname(dataFilePath), { recursive: true });
-  try {
-    await fs.access(dataFilePath);
-  } catch {
-    await fs.writeFile(dataFilePath, '[]', 'utf8');
+let ensureTablePromise: Promise<void> | null = null;
+
+function getConnectionStrings() {
+  const candidates = [
+    process.env.POSTGRES_URL_NON_POOLING ??
+      null,
+    process.env.DATABASE_URL_UNPOOLED ?? null,
+    process.env.DATABASE_URL ?? null,
+    process.env.POSTGRES_URL ?? null,
+  ].filter((value): value is string => Boolean(value));
+
+  return [...new Set(candidates)];
+}
+
+async function runQuery<T extends Record<string, unknown>>(
+  query: string,
+  params: Array<string | boolean | null>,
+) {
+  const connectionStrings = getConnectionStrings();
+  if (connectionStrings.length === 0) {
+    throw new Error(
+      'Missing DB connection string. Set POSTGRES_URL_NON_POOLING or DATABASE_URL/DATABASE_URL_UNPOOLED.',
+    );
   }
+
+  let lastError: unknown = null;
+  for (const connectionString of connectionStrings) {
+    const isPooledConnection = connectionString.includes('-pooler.');
+    try {
+      if (isPooledConnection) {
+        const pool = createPool({ connectionString });
+        try {
+          return await pool.query<T>(query, params);
+        } finally {
+          await pool.end();
+        }
+      }
+
+      const client = createClient({ connectionString });
+      await client.connect();
+      try {
+        return await client.query<T>(query, params);
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (lastError instanceof Error) {
+    throw lastError;
+  }
+
+  throw new Error('Failed to connect to database.');
 }
 
-async function readTodos(): Promise<Todo[]> {
-  await ensureDataFile();
-  const raw = await fs.readFile(dataFilePath, 'utf8');
-  const parsed: unknown = JSON.parse(raw);
-  return Array.isArray(parsed) ? (parsed as Todo[]) : [];
+function toIsoDate(value: string | Date): string {
+  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }
 
-async function writeTodos(todos: Todo[]) {
-  await ensureDataFile();
-  await fs.writeFile(dataFilePath, `${JSON.stringify(todos, null, 2)}\n`, 'utf8');
+function mapTodoRow(row: TodoRow): Todo {
+  return {
+    id: row.id,
+    title: row.title,
+    completed: row.completed,
+    createdAt: toIsoDate(row.created_at),
+    updatedAt: toIsoDate(row.updated_at),
+  };
 }
 
-function withStoreLock<T>(task: () => Promise<T>): Promise<T> {
-  const nextTask = storeLock.then(task, task);
-  storeLock = nextTask.then(
-    () => undefined,
-    () => undefined,
-  );
-  return nextTask;
+async function ensureTodosTable() {
+  if (getConnectionStrings().length === 0) {
+    throw new Error(
+      'Missing DB connection string. Set POSTGRES_URL_NON_POOLING or DATABASE_URL/DATABASE_URL_UNPOOLED.',
+    );
+  }
+
+  if (!ensureTablePromise) {
+    ensureTablePromise = runQuery(
+      `CREATE TABLE IF NOT EXISTS todos (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        completed BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );`,
+      [],
+    )
+      .then(() => undefined)
+      .catch((error) => {
+        ensureTablePromise = null;
+        throw error;
+      });
+  }
+
+  await ensureTablePromise;
 }
 
 export async function listTodos(): Promise<Todo[]> {
-  const todos = await readTodos();
-  return todos.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  await ensureTodosTable();
+  const { rows } = await runQuery<TodoRow>(
+    `SELECT id, title, completed, created_at, updated_at
+     FROM todos
+     ORDER BY created_at DESC;`,
+    [],
+  );
+  return rows.map(mapTodoRow);
 }
 
 export async function createTodo(title: string): Promise<Todo> {
@@ -47,65 +126,65 @@ export async function createTodo(title: string): Promise<Todo> {
     throw new Error('Title is required.');
   }
 
-  return withStoreLock(async () => {
-    const todos = await readTodos();
-    const now = new Date().toISOString();
-    const todo: Todo = {
-      id: randomUUID(),
-      title: normalizedTitle,
-      completed: false,
-      createdAt: now,
-      updatedAt: now,
-    };
-    todos.push(todo);
-    await writeTodos(todos);
-    return todo;
-  });
+  await ensureTodosTable();
+  const id = randomUUID();
+  const { rows } = await runQuery<TodoRow>(
+    `INSERT INTO todos (id, title)
+     VALUES ($1, $2)
+     RETURNING id, title, completed, created_at, updated_at;`,
+    [id, normalizedTitle],
+  );
+  return mapTodoRow(rows[0]);
 }
 
 export async function updateTodo(
   id: string,
   updates: UpdateTodoPayload,
 ): Promise<Todo | null> {
-  return withStoreLock(async () => {
-    const todos = await readTodos();
-    const index = todos.findIndex((todo) => todo.id === id);
-    if (index < 0) {
-      return null;
-    }
+  await ensureTodosTable();
+  const hasTitleUpdate = typeof updates.title === 'string';
+  const normalizedTitle = hasTitleUpdate ? updates.title?.trim() : undefined;
 
-    const existing = todos[index];
-    const nextTitle =
-      typeof updates.title === 'string' ? updates.title.trim() : existing.title;
+  if (hasTitleUpdate && !normalizedTitle) {
+    throw new Error('Title cannot be empty.');
+  }
 
-    if (!nextTitle) {
-      throw new Error('Title cannot be empty.');
-    }
+  const hasCompletedUpdate = typeof updates.completed === 'boolean';
+  const { rows } = await runQuery<TodoRow>(
+    `UPDATE todos
+     SET
+       title = CASE
+         WHEN $2::BOOLEAN THEN $3
+         ELSE title
+       END,
+       completed = CASE
+         WHEN $4::BOOLEAN THEN $5
+         ELSE completed
+       END,
+       updated_at = NOW()
+     WHERE id = $1
+     RETURNING id, title, completed, created_at, updated_at;`,
+    [
+      id,
+      hasTitleUpdate,
+      normalizedTitle ?? null,
+      hasCompletedUpdate,
+      updates.completed ?? null,
+    ],
+  );
 
-    const updated: Todo = {
-      ...existing,
-      title: nextTitle,
-      completed:
-        typeof updates.completed === 'boolean'
-          ? updates.completed
-          : existing.completed,
-      updatedAt: new Date().toISOString(),
-    };
+  if (rows.length === 0) {
+    return null;
+  }
 
-    todos[index] = updated;
-    await writeTodos(todos);
-    return updated;
-  });
+  return mapTodoRow(rows[0]);
 }
 
 export async function removeTodo(id: string): Promise<boolean> {
-  return withStoreLock(async () => {
-    const todos = await readTodos();
-    const nextTodos = todos.filter((todo) => todo.id !== id);
-    if (nextTodos.length === todos.length) {
-      return false;
-    }
-    await writeTodos(nextTodos);
-    return true;
-  });
+  await ensureTodosTable();
+  const result = await runQuery(
+    `DELETE FROM todos WHERE id = $1;`,
+    [id],
+  );
+  return result.rowCount > 0;
 }

@@ -8,7 +8,7 @@ export default function HomePage() {
           <p className="eyebrow">Full Stack Next.js</p>
           <h1>Todo App</h1>
           <p className="subtitle">
-            Frontend UI + backend API routes with persistent JSON storage.
+            Frontend UI + backend API routes powered by Vercel Postgres.
           </p>
         </header>
         <TodoApp />
