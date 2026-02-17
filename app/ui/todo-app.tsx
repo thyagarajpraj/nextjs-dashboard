@@ -29,6 +29,9 @@ export function TodoApp() {
   const [title, setTitle] = useState('');
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [editingTodoId, setEditingTodoId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState('');
+  const [savingTodoId, setSavingTodoId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const counts = useMemo(() => {
@@ -97,6 +100,10 @@ export function TodoApp() {
   }
 
   async function handleToggle(todo: Todo) {
+    if (savingTodoId === todo.id) {
+      return;
+    }
+
     setError(null);
     const previousTodos = todos;
     const nextTodos = todos.map((item) =>
@@ -122,6 +129,10 @@ export function TodoApp() {
   }
 
   async function handleDelete(id: string) {
+    if (savingTodoId === id) {
+      return;
+    }
+
     setError(null);
     const previousTodos = todos;
     setTodos((current) => current.filter((todo) => todo.id !== id));
@@ -138,6 +149,49 @@ export function TodoApp() {
       const message =
         deleteError instanceof Error ? deleteError.message : 'Failed to delete todo.';
       setError(message);
+    }
+  }
+
+  function startEditing(todo: Todo) {
+    setError(null);
+    setEditingTodoId(todo.id);
+    setEditingTitle(todo.title);
+  }
+
+  function cancelEditing() {
+    setEditingTodoId(null);
+    setEditingTitle('');
+  }
+
+  async function saveTitle(todo: Todo) {
+    const nextTitle = editingTitle.trim();
+    if (!nextTitle) {
+      setError('Title cannot be empty.');
+      return;
+    }
+
+    setError(null);
+    setSavingTodoId(todo.id);
+    try {
+      const response = await fetch(`/api/todos/${todo.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: nextTitle }),
+      });
+      if (!response.ok) {
+        throw new Error(await readErrorMessage(response));
+      }
+      const data = (await response.json()) as SingleTodoResponse;
+      setTodos((current) =>
+        current.map((item) => (item.id === todo.id ? data.todo : item)),
+      );
+      cancelEditing();
+    } catch (updateError) {
+      const message =
+        updateError instanceof Error ? updateError.message : 'Failed to update todo.';
+      setError(message);
+    } finally {
+      setSavingTodoId(null);
     }
   }
 
@@ -174,21 +228,74 @@ export function TodoApp() {
         <ul className="todo-list">
           {todos.map((todo) => (
             <li key={todo.id} className={todo.completed ? 'is-complete' : ''}>
-              <label>
+              <div className="todo-item-content">
                 <input
                   type="checkbox"
                   checked={todo.completed}
+                  disabled={savingTodoId === todo.id}
                   onChange={() => void handleToggle(todo)}
                 />
-                <span>{todo.title}</span>
-              </label>
-              <button
-                type="button"
-                className="danger"
-                onClick={() => void handleDelete(todo.id)}
-              >
-                Delete
-              </button>
+                {editingTodoId === todo.id ? (
+                  <input
+                    className="todo-edit-input"
+                    type="text"
+                    value={editingTitle}
+                    onChange={(event) => setEditingTitle(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        void saveTitle(todo);
+                      } else if (event.key === 'Escape') {
+                        event.preventDefault();
+                        cancelEditing();
+                      }
+                    }}
+                    maxLength={200}
+                    autoFocus
+                  />
+                ) : (
+                  <span className="todo-title">{todo.title}</span>
+                )}
+              </div>
+              <div className="todo-actions">
+                {editingTodoId === todo.id ? (
+                  <>
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={savingTodoId === todo.id}
+                      onClick={() => void saveTitle(todo)}
+                    >
+                      {savingTodoId === todo.id ? 'Saving...' : 'Save'}
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost"
+                      disabled={savingTodoId === todo.id}
+                      onClick={cancelEditing}
+                    >
+                      Cancel
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="secondary"
+                    disabled={savingTodoId === todo.id}
+                    onClick={() => startEditing(todo)}
+                  >
+                    Edit
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="danger"
+                  disabled={savingTodoId === todo.id}
+                  onClick={() => void handleDelete(todo.id)}
+                >
+                  Delete
+                </button>
+              </div>
             </li>
           ))}
         </ul>
